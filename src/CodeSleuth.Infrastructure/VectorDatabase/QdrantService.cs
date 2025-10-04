@@ -12,7 +12,7 @@ namespace CodeSleuth.Infrastructure.VectorDatabase;
 /// Service for interacting with Qdrant vector database.
 /// Provides methods for managing collections and performing vector operations.
 /// </summary>
-public class QdrantService
+public class QdrantService : IQdrantService
 {
     private readonly QdrantClient _client;
     private readonly ILogger<QdrantService> _logger;
@@ -160,6 +160,147 @@ public class QdrantService
             _logger.LogError(ex, "Failed to search vectors");
             throw new InvalidOperationException($"Failed to search vectors: {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// Searches for similar vectors in the collection with metadata filtering.
+    /// </summary>
+    /// <param name="queryVector">The query vector to search for similar vectors.</param>
+    /// <param name="limit">The maximum number of results to return. Defaults to 10.</param>
+    /// <param name="filter">Metadata filter conditions to apply to the search.</param>
+    /// <param name="cancellationToken">Cancellation token for the operation.</param>
+    /// <returns>A list of search results with metadata and content.</returns>
+    /// <exception cref="ArgumentNullException">Thrown when queryVector is null.</exception>
+    /// <exception cref="ArgumentException">Thrown when queryVector has incorrect dimensions or limit is invalid.</exception>
+    /// <exception cref="InvalidOperationException">Thrown when search operation fails.</exception>
+    public async Task<List<QdrantSearchResult>> SearchSimilarAsync(
+        float[] queryVector, 
+        int limit = 10, 
+        Dictionary<string, object>? filter = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (queryVector == null)
+            throw new ArgumentNullException(nameof(queryVector));
+
+        if (queryVector.Length != VectorSize)
+            throw new ArgumentException($"Query vector must have {VectorSize} dimensions, but received {queryVector.Length}", nameof(queryVector));
+
+        if (limit <= 0)
+            throw new ArgumentException("Limit must be greater than 0", nameof(limit));
+
+        try
+        {
+            _logger.LogDebug("Searching for similar vectors with limit: {Limit}, filter: {@Filter}", limit, filter);
+
+            // Build filter conditions if provided
+            Filter? qdrantFilter = null;
+            if (filter != null && filter.Any())
+            {
+                var conditions = new List<Condition>();
+                foreach (var kvp in filter)
+                {
+                    var condition = new Condition
+                    {
+                        Field = new FieldCondition
+                        {
+                            Key = kvp.Key,
+                            Match = new Match { Keyword = kvp.Value.ToString() }
+                        }
+                    };
+                    conditions.Add(condition);
+                }
+
+                qdrantFilter = new Filter
+                {
+                    Must = { conditions }
+                };
+            }
+
+            var searchResult = await _client.SearchAsync(
+                collectionName: CollectionName,
+                vector: queryVector,
+                limit: (uint)limit,
+                filter: qdrantFilter,
+                payloadSelector: true // Include all payload fields
+            );
+
+            _logger.LogDebug("Search completed, found {Count} results", searchResult.Count);
+            
+            // Convert ScoredPoint to QdrantSearchResult
+            var results = new List<QdrantSearchResult>();
+            foreach (var point in searchResult)
+            {
+                var metadata = new Dictionary<string, object>();
+                var content = string.Empty;
+
+                if (point.Payload != null)
+                {
+                    foreach (var kvp in point.Payload)
+                    {
+                        if (kvp.Key == "content")
+                        {
+                            content = kvp.Value.StringValue ?? string.Empty;
+                        }
+                        else
+                        {
+                            metadata[kvp.Key] = ConvertFromValue(kvp.Value);
+                        }
+                    }
+                }
+
+                results.Add(new QdrantSearchResult
+                {
+                    Id = point.Id?.Uuid ?? string.Empty,
+                    Score = point.Score,
+                    Content = content,
+                    Metadata = metadata
+                });
+            }
+
+            return results;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to search vectors with filter");
+            throw new InvalidOperationException($"Failed to search vectors: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Lists all collections in the Qdrant instance.
+    /// </summary>
+    /// <param name="cancellationToken">Cancellation token for the operation.</param>
+    /// <returns>A list of collection names.</returns>
+    public async Task<List<string>> ListCollectionsAsync(CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            _logger.LogDebug("Listing all collections");
+            var collections = await _client.ListCollectionsAsync();
+            return collections.ToList();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to list collections");
+            throw new InvalidOperationException($"Failed to list collections: {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>
+    /// Converts a Qdrant Value back to a .NET object.
+    /// </summary>
+    /// <param name="value">The Qdrant Value to convert.</param>
+    /// <returns>The converted .NET object.</returns>
+    private static object ConvertFromValue(Value value)
+    {
+        return value.KindCase switch
+        {
+            Value.KindOneofCase.StringValue => value.StringValue,
+            Value.KindOneofCase.IntegerValue => value.IntegerValue,
+            Value.KindOneofCase.DoubleValue => value.DoubleValue,
+            Value.KindOneofCase.BoolValue => value.BoolValue,
+            _ => value.ToString()
+        };
     }
 
     /// <summary>
