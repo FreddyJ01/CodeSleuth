@@ -17,6 +17,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\CodeSleuth.Infrastructure\CodeSleuth.Infrastructure.csproj" />
+    <ProjectReference Include="..\..\src\CodeSleuth.Core\CodeSleuth.Core.csproj" />
   </ItemGroup>
 
   <ItemGroup>
