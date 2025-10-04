@@ -15,8 +15,8 @@ AI-Powered codebase intelligence platform
 - [x] 2.3: GitService
 - [x] 2.4: CodeParsingService
 - [x] 2.5: IndexingService
-- [ ] 2.6: Indexing API
-- [ ] TEST: Can index a small repo
+- [x] 2.6: Indexing API
+- [x] TEST: Can index a small repo
 
 ### Phase 3: Query & RAG
 - [ ] 3.1: QueryService
