@@ -226,6 +226,9 @@ public class IndexingServiceTests
             CurrentFile = "test.cs"
         };
         ((IProgress<IndexingProgress>)progress).Report(testProgress);
+        
+        // Give the progress reporter a moment to process the callback
+        Thread.Sleep(50);
 
         // Assert
         Assert.Single(progressReports);
