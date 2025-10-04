@@ -1,0 +1,49 @@
+@host = http://localhost:5121
+@contentType = application/json
+
+### Get all repositories
+GET {{host}}/api/repository
+Content-Type: {{contentType}}
+
+### Start indexing a repository
+POST {{host}}/api/repository/index
+Content-Type: {{contentType}}
+
+{
+    "repoUrl": "https://github.com/microsoft/vscode.git",
+    "repoName": "vscode"
+}
+
+### Get indexing status for a repository
+GET {{host}}/api/repository/vscode/status
+Content-Type: {{contentType}}
+
+### Cancel indexing for a repository
+POST {{host}}/api/repository/vscode/cancel
+Content-Type: {{contentType}}
+
+### Delete a repository
+DELETE {{host}}/api/repository/vscode
+Content-Type: {{contentType}}
+
+### Test validation - empty request body
+POST {{host}}/api/repository/index
+Content-Type: {{contentType}}
+
+{
+    "repoUrl": "",
+    "repoName": ""
+}
+
+### Test validation - missing repository name
+POST {{host}}/api/repository/index
+Content-Type: {{contentType}}
+
+{
+    "repoUrl": "https://github.com/test/repo.git",
+    "repoName": ""
+}
+
+### Test getting status for non-existent repository
+GET {{host}}/api/repository/non-existent/status
+Content-Type: {{contentType}}
