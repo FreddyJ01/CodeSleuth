@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using CodeSleuth.Core.Services;
+using CodeSleuth.Core.Models;
 using System.Collections.Concurrent;
 
 namespace CodeSleuth.API.Controllers;
@@ -26,6 +27,24 @@ public record IndexResponse(string Message, string RepoName);
 public record StatusResponse(string Status, IndexingProgress? Progress);
 
 /// <summary>
+/// Request model for querying a repository.
+/// </summary>
+/// <param name="Question">The question to ask about the repository.</param>
+public record QueryRequest(string Question);
+
+/// <summary>
+/// Response model for repository query results.
+/// </summary>
+/// <param name="Answer">The AI-generated answer to the question.</param>
+/// <param name="References">List of code references that support the answer.</param>
+/// <param name="DurationMs">Time taken to process the query in milliseconds.</param>
+public record QueryResponse(
+    string Answer,
+    List<CodeReference> References,
+    double DurationMs
+);
+
+/// <summary>
 /// Controller for managing repository indexing operations.
 /// Provides endpoints for starting indexing, checking status, and deleting indexed data.
 /// </summary>
@@ -35,6 +54,7 @@ public record StatusResponse(string Status, IndexingProgress? Progress);
 public class RepositoryController : ControllerBase
 {
     private readonly IndexingService _indexingService;
+    private readonly QueryService _queryService;
     private readonly ILogger<RepositoryController> _logger;
     
     // In-memory storage for indexing status (MVP implementation)
@@ -46,10 +66,12 @@ public class RepositoryController : ControllerBase
     /// Initializes a new instance of the RepositoryController.
     /// </summary>
     /// <param name="indexingService">The service responsible for repository indexing.</param>
+    /// <param name="queryService">The service responsible for answering questions about repositories.</param>
     /// <param name="logger">The logger instance for this controller.</param>
-    public RepositoryController(IndexingService indexingService, ILogger<RepositoryController> logger)
+    public RepositoryController(IndexingService indexingService, QueryService queryService, ILogger<RepositoryController> logger)
     {
         _indexingService = indexingService ?? throw new ArgumentNullException(nameof(indexingService));
+        _queryService = queryService ?? throw new ArgumentNullException(nameof(queryService));
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
     }
 
@@ -435,6 +457,120 @@ public class RepositoryController : ControllerBase
             {
                 Title = "Internal Server Error",
                 Detail = "An unexpected error occurred while cancelling the indexing process.",
+                Status = StatusCodes.Status500InternalServerError
+            });
+        }
+    }
+
+    /// <summary>
+    /// Queries the indexed repository with a natural language question.
+    /// </summary>
+    /// <param name="repoName">The name of the repository to query.</param>
+    /// <param name="request">The query request containing the question.</param>
+    /// <returns>An AI-generated answer with relevant code references.</returns>
+    /// <response code="200">Query processed successfully.</response>
+    /// <response code="400">Invalid request data (empty or null question).</response>
+    /// <response code="404">Repository not found or not indexed.</response>
+    /// <response code="500">Internal server error occurred.</response>
+    [HttpPost("{repoName}/query")]
+    [ProducesResponseType(typeof(QueryResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> QueryRepository(string repoName, [FromBody] QueryRequest request)
+    {
+        try
+        {
+            _logger.LogInformation("Received query request for repository: {RepoName}, Question: {Question}", 
+                repoName, request.Question);
+
+            // Validate repository name
+            if (string.IsNullOrWhiteSpace(repoName))
+            {
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Invalid Request",
+                    Detail = "Repository name is required.",
+                    Status = StatusCodes.Status400BadRequest
+                });
+            }
+
+            // Validate question
+            if (string.IsNullOrWhiteSpace(request.Question))
+            {
+                _logger.LogWarning("Invalid query request: Question is empty for repository {RepoName}", repoName);
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Invalid Request", 
+                    Detail = "Question cannot be empty or null.",
+                    Status = StatusCodes.Status400BadRequest
+                });
+            }
+
+            // Check if repository exists and is indexed
+            bool repositoryExists = _completedRepositories.ContainsKey(repoName) && 
+                                  _completedRepositories[repoName] == "completed";
+            
+            bool currentlyIndexing = _indexingStatus.ContainsKey(repoName);
+
+            if (!repositoryExists && !currentlyIndexing)
+            {
+                _logger.LogWarning("Repository {RepoName} not found or not indexed", repoName);
+                return NotFound(new ProblemDetails
+                {
+                    Title = "Repository Not Found",
+                    Detail = $"Repository '{repoName}' has not been indexed or does not exist. Please index the repository first.",
+                    Status = StatusCodes.Status404NotFound
+                });
+            }
+
+            if (currentlyIndexing)
+            {
+                _logger.LogWarning("Repository {RepoName} is still being indexed", repoName);
+                return BadRequest(new ProblemDetails
+                {
+                    Title = "Repository Not Ready",
+                    Detail = $"Repository '{repoName}' is currently being indexed. Please wait for indexing to complete before querying.",
+                    Status = StatusCodes.Status400BadRequest
+                });
+            }
+
+            // Execute the query
+            var queryResult = await _queryService.AskQuestionAsync(
+                request.Question, 
+                repoName, 
+                maxResults: 10);
+
+            // Convert to response DTO
+            var response = new QueryResponse(
+                queryResult.Answer,
+                queryResult.References,
+                queryResult.Duration.TotalMilliseconds
+            );
+
+            _logger.LogInformation("Successfully processed query for repository: {RepoName}. Answer length: {AnswerLength}, References: {ReferenceCount}, Duration: {Duration}ms", 
+                repoName, response.Answer.Length, response.References.Count, response.DurationMs);
+
+            return Ok(response);
+        }
+        catch (ArgumentException ex)
+        {
+            _logger.LogWarning(ex, "Invalid argument in query request for repository: {RepoName}", repoName);
+            return BadRequest(new ProblemDetails
+            {
+                Title = "Invalid Request",
+                Detail = ex.Message,
+                Status = StatusCodes.Status400BadRequest
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error occurred while processing query for repository: {RepoName}, Question: {Question}", 
+                repoName, request.Question);
+            return StatusCode(StatusCodes.Status500InternalServerError, new ProblemDetails
+            {
+                Title = "Internal Server Error",
+                Detail = "An unexpected error occurred while processing your question. Please try again later.",
                 Status = StatusCodes.Status500InternalServerError
             });
         }
