@@ -23,7 +23,7 @@ public class EmbeddingGenerationException : Exception
 /// Service for generating embeddings using Azure OpenAI or OpenAI direct endpoints.
 /// Supports both single text and batch processing with retry logic.
 /// </summary>
-public class EmbeddingService
+public class EmbeddingService : IEmbeddingService
 {
     private readonly AzureOpenAIClient _client;
     private readonly ILogger<EmbeddingService> _logger;
