@@ -19,8 +19,8 @@ AI-Powered codebase intelligence platform
 - [x] TEST: Can index a small repo
 
 ### Phase 3: Query & RAG
-- [ ] 3.1: QueryService
-- [ ] 3.2: Query API endpoint
+- [x] 3.1: QueryService
+- [x] 3.2: Query API endpoint
 - [ ] 3.3: Chat completion setup
 - [ ] TEST: Can ask questions and get answers
 

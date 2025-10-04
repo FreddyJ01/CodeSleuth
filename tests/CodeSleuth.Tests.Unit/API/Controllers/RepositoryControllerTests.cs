@@ -1,11 +1,16 @@
 using System;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.SemanticKernel.ChatCompletion;
 using Moq;
 using Xunit;
 using CodeSleuth.API.Controllers;
+using CodeSleuth.Core.Models;
 using CodeSleuth.Core.Services;
+using CodeSleuth.Infrastructure.AI;
+using CodeSleuth.Infrastructure.VectorDatabase;
 
 namespace CodeSleuth.Tests.Unit.API.Controllers;
 
@@ -40,7 +45,14 @@ public class RepositoryControllerTests : IDisposable
 
         var indexingService = new IndexingService(gitService, codeParsingService, embeddingService, qdrantService, Mock.Of<ILogger<IndexingService>>());
         
-        _controller = new RepositoryController(indexingService, _mockLogger.Object);
+        // Create mock QueryService for testing
+        var mockQueryService = new Mock<QueryService>(
+            embeddingService, 
+            qdrantService, 
+            Mock.Of<Microsoft.SemanticKernel.ChatCompletion.IChatCompletionService>(),
+            Mock.Of<ILogger<QueryService>>()) { CallBase = false };
+        
+        _controller = new RepositoryController(indexingService, mockQueryService.Object, _mockLogger.Object);
     }
 
     private static void ClearStaticState()
@@ -79,16 +91,21 @@ public class RepositoryControllerTests : IDisposable
         ClearStaticState();
     }
 
-    [Fact]
-    public void Constructor_WithNullIndexingService_ShouldThrowArgumentNullException()
-    {
-        // Arrange & Act & Assert
-        Assert.Throws<ArgumentNullException>(() => 
-            new RepositoryController(null!, _mockLogger.Object));
-    }
+        [Fact]
+        public void Constructor_WithNullIndexingService_ShouldThrowArgumentNullException()
+        {
+            // Arrange
+            var mockEmbeddingService = Mock.Of<IEmbeddingService>();
+            var mockQdrantService = Mock.Of<IQdrantService>();
+            var mockChatCompletionService = Mock.Of<IChatCompletionService>();
+            var mockQueryLogger = Mock.Of<ILogger<QueryService>>();
+            var mockQueryService = new QueryService(mockEmbeddingService, mockQdrantService, mockChatCompletionService, mockQueryLogger);
+            var mockLogger = Mock.Of<ILogger<RepositoryController>>();
 
-    [Fact]
-    public void Constructor_WithNullLogger_ShouldThrowArgumentNullException()
+            // Act & Assert
+            Assert.Throws<ArgumentNullException>(() => new RepositoryController(null!, mockQueryService, mockLogger));
+        }    [Fact]
+    public void Constructor_WithNullQueryService_ShouldThrowArgumentNullException()
     {
         // Arrange
         var mockGitLogger = Mock.Of<ILogger<CodeSleuth.Infrastructure.Git.GitService>>();
@@ -103,9 +120,9 @@ public class RepositoryControllerTests : IDisposable
         var qdrantService = new CodeSleuth.Infrastructure.VectorDatabase.QdrantService(mockQdrantLogger, "localhost");
         var indexingService = new IndexingService(gitService, codeParsingService, embeddingService, qdrantService, Mock.Of<ILogger<IndexingService>>());
 
-        // Act & Assert
+                // Act & Assert
         Assert.Throws<ArgumentNullException>(() => 
-            new RepositoryController(indexingService, null!));
+            new RepositoryController(indexingService, null!, _mockLogger.Object));
     }
 
     [Fact]
