@@ -72,11 +72,11 @@ public class IndexingService
     private readonly GitService _gitService;
     private readonly CodeParsingService _codeParsingService;
     private readonly EmbeddingService _embeddingService;
-    private readonly QdrantService _qdrantService;
+    private readonly IQdrantService _qdrantService;
     private readonly ILogger<IndexingService> _logger;
 
     private const int ProgressReportInterval = 10;
-    private const int EmbeddingBatchSize = 50;
+    private const int EmbeddingBatchSize = 200; // Increased from 50 for better performance
 
     /// <summary>
     /// Initializes a new instance of the <see cref="IndexingService"/> class.
@@ -91,7 +91,7 @@ public class IndexingService
         GitService gitService,
         CodeParsingService codeParsingService,
         EmbeddingService embeddingService,
-        QdrantService qdrantService,
+        IQdrantService qdrantService,
         ILogger<IndexingService> logger)
     {
         _gitService = gitService ?? throw new ArgumentNullException(nameof(gitService));
@@ -275,8 +275,8 @@ public class IndexingService
                 // Generate embeddings for the batch
                 var embeddings = await _embeddingService.GenerateEmbeddingsAsync(searchableTexts, cancellationToken);
                 
-                // Store each chunk with its embedding
-                var upsertTasks = new List<Task>();
+                // Prepare bulk upsert items
+                var bulkItems = new List<(Guid id, float[] vector, Dictionary<string, object> metadata)>();
                 
                 for (int j = 0; j < batch.Count && j < embeddings.Count; j++)
                 {
@@ -286,10 +286,11 @@ public class IndexingService
                     var metadata = CreateMetadata(chunk, repoName);
                     var id = GenerateChunkId(chunk);
                     
-                    upsertTasks.Add(_qdrantService.UpsertAsync(id, embedding, metadata));
+                    bulkItems.Add((id, embedding, metadata));
                 }
                 
-                await Task.WhenAll(upsertTasks);
+                // Perform bulk upsert in a single API call
+                await _qdrantService.UpsertBulkAsync(bulkItems, cancellationToken);
                 
                 _logger.LogDebug("Successfully stored batch {BatchNumber}", (i / EmbeddingBatchSize) + 1);
             }

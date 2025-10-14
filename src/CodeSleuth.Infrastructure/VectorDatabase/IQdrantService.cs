@@ -16,6 +16,23 @@ public interface IQdrantService
     Task InitializeCollectionAsync();
 
     /// <summary>
+    /// Upserts a vector into the database with the given metadata.
+    /// </summary>
+    /// <param name="id">The unique identifier for the vector.</param>
+    /// <param name="vector">The vector data.</param>
+    /// <param name="metadata">The metadata associated with the vector.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task UpsertAsync(Guid id, float[] vector, Dictionary<string, object> metadata);
+
+    /// <summary>
+    /// Bulk upserts multiple vectors in a single operation for better performance.
+    /// </summary>
+    /// <param name="items">Collection of items to upsert (id, vector, metadata).</param>
+    /// <param name="cancellationToken">Cancellation token for the operation.</param>
+    /// <returns>A task representing the asynchronous operation.</returns>
+    Task UpsertBulkAsync(IEnumerable<(Guid id, float[] vector, Dictionary<string, object> metadata)> items, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Searches for vectors similar to the provided query vector.
     /// </summary>
     /// <param name="queryVector">The query vector to search for similar vectors.</param>

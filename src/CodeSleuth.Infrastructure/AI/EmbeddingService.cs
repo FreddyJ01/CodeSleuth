@@ -27,6 +27,8 @@ public class EmbeddingService : IEmbeddingService
 {
     private readonly AzureOpenAIClient _client;
     private readonly ILogger<EmbeddingService> _logger;
+    private const int MaxTokensPerRequest = 6000; // Much more conservative limit below 8192
+    private const int EstimatedCharsPerToken = 3; // More aggressive estimate for code (typically 2-4 chars/token)
     private readonly string _embeddingModel;
     private readonly bool _isAzureEndpoint;
     private readonly int _maxRetries;
@@ -70,7 +72,7 @@ public class EmbeddingService : IEmbeddingService
         if (_isAzureEndpoint)
         {
             _logger.LogInformation("Initializing EmbeddingService with Azure OpenAI endpoint: {Endpoint}", endpoint);
-            _client = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey));
+            _client = new AzureOpenAIClient(new Uri(endpoint), new ApiKeyCredential(apiKey));
         }
         else
         {
@@ -125,33 +127,76 @@ public class EmbeddingService : IEmbeddingService
 
         _logger.LogDebug("Generating embeddings for {Count} texts", texts.Count);
 
-        return await ExecuteWithRetryAsync(async () =>
+        // Process each text and handle chunking if needed
+        var allEmbeddings = new List<float[]>();
+        var processedTexts = new List<string>();
+        
+        // Split texts that are too long into chunks
+        foreach (var text in texts)
         {
-            try
+            var estimatedTokens = EstimateTokenCount(text);
+            if (estimatedTokens > MaxTokensPerRequest)
             {
-                var embeddingClient = _client.GetEmbeddingClient(_embeddingModel);
-                var response = await embeddingClient.GenerateEmbeddingsAsync(texts, new OpenAI.Embeddings.EmbeddingGenerationOptions { });
+                _logger.LogWarning("Text exceeds token limit ({EstimatedTokens} > {MaxTokens}), splitting into chunks", 
+                    estimatedTokens, MaxTokensPerRequest);
+                
+                var chunks = SplitTextIntoChunks(text);
+                processedTexts.AddRange(chunks);
+            }
+            else
+            {
+                processedTexts.Add(text);
+            }
+        }
 
-                var embeddings = new List<float[]>();
-                foreach (var embeddingItem in response.Value)
+        if (processedTexts.Count != texts.Count)
+        {
+            _logger.LogInformation("Split {OriginalCount} texts into {ProcessedCount} chunks due to token limits", 
+                texts.Count, processedTexts.Count);
+        }
+
+        // Process texts in batches to stay within API limits
+        const int batchSize = 100; // Conservative batch size for API
+        for (int i = 0; i < processedTexts.Count; i += batchSize)
+        {
+            var batch = processedTexts.Skip(i).Take(batchSize).ToList();
+            
+            var batchEmbeddings = await ExecuteWithRetryAsync(async () =>
+            {
+                try
                 {
-                    embeddings.Add(embeddingItem.ToFloats().ToArray());
-                }
+                    var embeddingClient = _client.GetEmbeddingClient(_embeddingModel);
+                    var response = await embeddingClient.GenerateEmbeddingsAsync(batch, new OpenAI.Embeddings.EmbeddingGenerationOptions { });
 
-                _logger.LogDebug("Successfully generated {Count} embeddings", embeddings.Count);
-                return embeddings;
-            }
-            catch (RequestFailedException ex)
-            {
-                _logger.LogError(ex, "Azure OpenAI request failed: {Message}", ex.Message);
-                throw new EmbeddingGenerationException($"Failed to generate embeddings: {ex.Message}", ex);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogError(ex, "Unexpected error during embedding generation: {Message}", ex.Message);
-                throw new EmbeddingGenerationException($"Unexpected error during embedding generation: {ex.Message}", ex);
-            }
-        }, cancellationToken);
+                    var embeddings = new List<float[]>();
+                    foreach (var embeddingItem in response.Value)
+                    {
+                        embeddings.Add(embeddingItem.ToFloats().ToArray());
+                    }
+
+                    _logger.LogDebug("Successfully generated {Count} embeddings for batch starting at index {StartIndex}", 
+                        embeddings.Count, i);
+                    return embeddings;
+                }
+                catch (RequestFailedException ex)
+                {
+                    _logger.LogError(ex, "Azure OpenAI request failed for batch starting at index {StartIndex}: {Message}", i, ex.Message);
+                    throw new EmbeddingGenerationException($"Failed to process embedding batch starting at index {i}: {ex.Message}", ex);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "Unexpected error during embedding generation for batch starting at index {StartIndex}: {Message}", i, ex.Message);
+                    throw new EmbeddingGenerationException($"Failed to process embedding batch starting at index {i}: Unexpected error during embedding generation: {ex.Message}", ex);
+                }
+            }, cancellationToken);
+            
+            allEmbeddings.AddRange(batchEmbeddings);
+        }
+
+        _logger.LogDebug("Successfully generated {Count} total embeddings from {OriginalCount} original texts", 
+            allEmbeddings.Count, texts.Count);
+        
+        return allEmbeddings;
     }
 
     /// <summary>
@@ -234,6 +279,157 @@ public class EmbeddingService : IEmbeddingService
 
         // Cap the delay at 30 seconds
         return TimeSpan.FromMilliseconds(Math.Min(totalDelay, 30_000));
+    }
+
+    /// <summary>
+    /// Estimates the number of tokens in a text string.
+    /// Uses a conservative character-to-token ratio for estimation.
+    /// </summary>
+    /// <param name="text">The text to estimate tokens for.</param>
+    /// <returns>Estimated number of tokens.</returns>
+    private int EstimateTokenCount(string text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return 0;
+            
+        // Conservative estimate: ~4 characters per token for English text
+        return (int)Math.Ceiling((double)text.Length / EstimatedCharsPerToken);
+    }
+
+    /// <summary>
+    /// Splits a text into smaller chunks that fit within the token limit.
+    /// </summary>
+    /// <param name="text">The text to split.</param>
+    /// <returns>A list of text chunks that each fit within the token limit.</returns>
+    private List<string> SplitTextIntoChunks(string text)
+    {
+        var chunks = new List<string>();
+        
+        if (string.IsNullOrEmpty(text))
+            return chunks;
+
+        var estimatedTokens = EstimateTokenCount(text);
+        
+        // If the text is already within limits, return as-is
+        if (estimatedTokens <= MaxTokensPerRequest)
+        {
+            chunks.Add(text);
+            return chunks;
+        }
+
+        // Calculate approximate character limit per chunk
+        var maxCharsPerChunk = MaxTokensPerRequest * EstimatedCharsPerToken;
+        
+        // Split by lines first to preserve code structure
+        var lines = text.Split(new[] { '\r', '\n' }, StringSplitOptions.None);
+        var currentChunk = new List<string>();
+        var currentChunkLength = 0;
+
+        foreach (var line in lines)
+        {
+            var lineLength = line.Length + 1; // +1 for newline
+            
+            // If adding this line would exceed the limit, save current chunk and start new one
+            if (currentChunkLength + lineLength > maxCharsPerChunk && currentChunk.Count > 0)
+            {
+                chunks.Add(string.Join("\n", currentChunk));
+                currentChunk.Clear();
+                currentChunkLength = 0;
+            }
+            
+            // If a single line is too long, split it by sentences or characters
+            if (lineLength > maxCharsPerChunk)
+            {
+                var lineParts = SplitLongLine(line, maxCharsPerChunk);
+                chunks.AddRange(lineParts);
+            }
+            else
+            {
+                currentChunk.Add(line);
+                currentChunkLength += lineLength;
+            }
+        }
+
+        // Add remaining lines as the last chunk
+        if (currentChunk.Count > 0)
+        {
+            chunks.Add(string.Join("\n", currentChunk));
+        }
+
+        _logger.LogDebug("Split text of {OriginalTokens} estimated tokens into {ChunkCount} chunks", 
+            estimatedTokens, chunks.Count);
+
+        return chunks;
+    }
+
+    /// <summary>
+    /// Splits a long line into smaller parts that fit within the character limit.
+    /// </summary>
+    /// <param name="line">The line to split.</param>
+    /// <param name="maxChars">Maximum characters per part.</param>
+    /// <returns>List of line parts.</returns>
+    private List<string> SplitLongLine(string line, int maxChars)
+    {
+        var parts = new List<string>();
+        
+        if (line.Length <= maxChars)
+        {
+            parts.Add(line);
+            return parts;
+        }
+
+        // Try to split by sentences first
+        var sentences = line.Split(new[] { '.', '!', '?' }, StringSplitOptions.RemoveEmptyEntries);
+        if (sentences.Length > 1)
+        {
+            var currentPart = "";
+            foreach (var sentence in sentences)
+            {
+                var sentenceWithPunctuation = sentence + ".";
+                if (currentPart.Length + sentenceWithPunctuation.Length <= maxChars)
+                {
+                    currentPart += sentenceWithPunctuation;
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(currentPart))
+                    {
+                        parts.Add(currentPart);
+                        currentPart = "";
+                    }
+                    
+                    if (sentenceWithPunctuation.Length <= maxChars)
+                    {
+                        currentPart = sentenceWithPunctuation;
+                    }
+                    else
+                    {
+                        // Split by character if sentence is too long
+                        for (int i = 0; i < sentenceWithPunctuation.Length; i += maxChars)
+                        {
+                            var end = Math.Min(i + maxChars, sentenceWithPunctuation.Length);
+                            parts.Add(sentenceWithPunctuation.Substring(i, end - i));
+                        }
+                    }
+                }
+            }
+            
+            if (!string.IsNullOrEmpty(currentPart))
+            {
+                parts.Add(currentPart);
+            }
+        }
+        else
+        {
+            // Split by character as last resort
+            for (int i = 0; i < line.Length; i += maxChars)
+            {
+                var end = Math.Min(i + maxChars, line.Length);
+                parts.Add(line.Substring(i, end - i));
+            }
+        }
+
+        return parts;
     }
 
     /// <summary>
