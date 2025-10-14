@@ -28,8 +28,19 @@ public class QdrantService : IQdrantService
     public QdrantService(ILogger<QdrantService> logger, string host = "localhost", int port = 6334)
     {
         _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _client = new QdrantClient(host, port);
-        _logger.LogInformation("QdrantService initialized with host: {Host}, port: {Port}", host, port);
+        
+        try
+        {
+            // Use simple constructor with proper host format (just hostname, not URL)
+            _client = new QdrantClient(host, port, https: false);
+            
+            _logger.LogInformation("QdrantService initialized - host: {Host}, port: {Port}", host, port);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to initialize QdrantService with host: {Host}, port: {Port}", host, port);
+            throw;
+        }
     }
 
     /// <summary>
@@ -96,29 +107,78 @@ public class QdrantService : IQdrantService
 
         try
         {
-            _logger.LogDebug("Upserting vector with ID: {Id}", id);
-
-            var pointStruct = new PointStruct
-            {
-                Id = new PointId { Uuid = id.ToString() },
-                Vectors = vector,
-                Payload = { }
-            };
-
-            // Add metadata to payload
-            foreach (var kvp in metadata)
-            {
-                pointStruct.Payload[kvp.Key] = ConvertToValue(kvp.Value);
-            }
-
-            await _client.UpsertAsync(CollectionName, new[] { pointStruct });
-            _logger.LogDebug("Successfully upserted vector with ID: {Id}", id);
+            await UpsertWithRetryAsync(id, vector, metadata);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Failed to upsert vector with ID: {Id}", id);
+            _logger.LogError(ex, "Failed to upsert vector with ID: {Id} after all retry attempts", id);
             throw new InvalidOperationException($"Failed to upsert vector with ID '{id}': {ex.Message}", ex);
         }
+    }
+
+    /// <summary>
+    /// Upserts a vector with retry logic for handling transient network issues.
+    /// </summary>
+    private async Task UpsertWithRetryAsync(Guid id, float[] vector, Dictionary<string, object> metadata, int maxRetries = 3)
+    {
+        Exception? lastException = null;
+        
+        for (int attempt = 0; attempt <= maxRetries; attempt++)
+        {
+            try
+            {
+                _logger.LogDebug("Upserting vector with ID: {Id} (attempt {Attempt}/{MaxRetries})", id, attempt + 1, maxRetries + 1);
+
+                var pointStruct = new PointStruct
+                {
+                    Id = new PointId { Uuid = id.ToString() },
+                    Vectors = vector,
+                    Payload = { }
+                };
+
+                // Add metadata to payload
+                foreach (var kvp in metadata)
+                {
+                    pointStruct.Payload[kvp.Key] = ConvertToValue(kvp.Value);
+                }
+
+                await _client.UpsertAsync(CollectionName, new[] { pointStruct });
+                _logger.LogDebug("Successfully upserted vector with ID: {Id} on attempt {Attempt}", id, attempt + 1);
+                return; // Success, exit retry loop
+            }
+            catch (Grpc.Core.RpcException ex) when (IsRetryableGrpcError(ex) && attempt < maxRetries)
+            {
+                lastException = ex;
+                var delay = TimeSpan.FromMilliseconds(Math.Pow(2, attempt) * 1000); // Exponential backoff
+                _logger.LogWarning(ex, "Retryable gRPC error for vector ID {Id} on attempt {Attempt}, retrying in {Delay}ms: {Message}", 
+                    id, attempt + 1, delay.TotalMilliseconds, ex.Message);
+                
+                await Task.Delay(delay);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Non-retryable error for vector ID {Id} on attempt {Attempt}: {Message}", id, attempt + 1, ex.Message);
+                throw;
+            }
+        }
+        
+        // If we get here, all retries failed
+        throw lastException ?? new InvalidOperationException($"Failed to upsert vector with ID '{id}' after {maxRetries + 1} attempts");
+    }
+
+    /// <summary>
+    /// Determines if a gRPC error is retryable.
+    /// </summary>
+    private static bool IsRetryableGrpcError(Grpc.Core.RpcException ex)
+    {
+        return ex.StatusCode switch
+        {
+            Grpc.Core.StatusCode.Internal => ex.Message.Contains("HTTP/2") || ex.Message.Contains("PROTOCOL_ERROR"),
+            Grpc.Core.StatusCode.Unavailable => true,
+            Grpc.Core.StatusCode.DeadlineExceeded => true,
+            Grpc.Core.StatusCode.ResourceExhausted => true,
+            _ => false
+        };
     }
 
     /// <summary>
@@ -341,6 +401,14 @@ public class QdrantService : IQdrantService
             bool boolVal => new Value { BoolValue = boolVal },
             _ => new Value { StringValue = obj?.ToString() ?? string.Empty }
         };
+    }
+
+    /// <summary>
+    /// Bulk upserts multiple vectors (not implemented in gRPC version).
+    /// </summary>
+    public Task UpsertBulkAsync(IEnumerable<(Guid id, float[] vector, Dictionary<string, object> metadata)> items, CancellationToken cancellationToken = default)
+    {
+        throw new NotImplementedException("Bulk upsert is only available in QdrantRestService");
     }
 
     /// <summary>
